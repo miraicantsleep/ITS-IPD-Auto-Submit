@@ -1,84 +1,28 @@
-from Crypto.PublicKey import RSA
-from Crypto.Cipher import PKCS1_v1_5
 from bs4 import BeautifulSoup
 from typing import List, Tuple
 from settings import *
-from pwn import log
+from utils.log import log
 import requests
 import urllib3
-import base64
-import json
 import re
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 proxy = {'http': 'http://127.0.0.1:8080', 'https': 'http://127.0.0.1:8080'} # burp debug
 
-def encrypt(username, password, pubkey) -> bytes:
-    public_key = RSA.importKey(pubkey)
-    cipher = PKCS1_v1_5.new(public_key)
-
-    plaintext = {
-        "u": username,
-        "p": password,
-        "dm": '',
-        "ps": ''
-    }
-
-    plaintext_str = json.dumps(plaintext)
-    encrypted_data = cipher.encrypt(plaintext_str.encode('utf-8'))
-    encrypted_base64 = base64.b64encode(encrypted_data).decode('utf-8')
-
-    return encrypted_base64
-
-def login():
-    res = client.get(
-        'https://my.its.ac.id/signin' + \
-        '?response_type=code' + \
-        '&redirect_uri=https%3A%2F%2Fportal.its.ac.id%2Fapi%2Fauth' + \
-        f'&client_id={CLIENT_ID}' + \
-        f'&nonce={NONCE}' + \
-        f'&state={STATE}' + \
-        '&scope=group+resource+role+openid'
-        )
-
-    if res.status_code != 200:
-        log.failure('failed to get login page')
+def check_session() -> bool:
+    client.cookies.set('PHPSESSID', PHPSESSID)
+    res = client.get("https://akademik.its.ac.id/home.php", allow_redirects=True)
+    if 'Microsoft' in res.text:
+        log.failure('Provide a valid PHPSESSID')
         exit(1)
-
+    global soup, SEMESTER_TERM, TAHUN_AJARAN
     soup = BeautifulSoup(res.text, 'html.parser')
-    try:
-        pubkey = soup.find('input', {'id': 'pubkey'})['value']
-        pubkey = pubkey.replace("\t", "")
-        log.info(pubkey)
-    except Exception as e:
-        log.failure('failed to get pubkey')
-        exit(1)
-
-    content = encrypt(NRP, PASSWORD, pubkey)
-    try:
-        res = client.post('https://my.its.ac.id/signin', data={
-            'client_id': CLIENT_ID,
-            'response_type': 'code',
-            'scope': 'group resource role openid',
-            'state': STATE,
-            'prompt': '',
-            'redirect_uri': 'https://portal.its.ac.id/api/auth',
-            'nonce': NONCE,
-            'content': content,
-            'password_state': True,
-            'device_method': ''
-        }, allow_redirects=True)
-    except Exception as e:
-        log.failure("failed to login")
-        print(e)
-        exit(1)
-
-    if res.status_code != 200:
-        log.failure('failed to login')
-        exit(1)
-
-    for c in client.cookies:
-        log.info("%s | %s | %s", c.name, c.value, c.domain)
+    log.success('Session is valid')
+    # auto get term and year
+    targets = soup.find('td', string=lambda t: t and 'Periode:' in t and 'Tanggal:' in t).encode().split(b'\t\t')
+    SEMESTER_TERM = '1' if b'Gasal' in targets[1] else '2'
+    TAHUN_AJARAN = targets[1].split(b' ')[-1].split(b'/')[0]
+    return True
 
 def get_courses() -> Tuple[List[str], List[str]]:
     client.get("https://akademik.its.ac.id/home.php", allow_redirects=True)
@@ -140,6 +84,7 @@ def submit_course_ipd():
     })
 
 def get_lecturer_list(code) -> List[str]:
+    # print(target.encode().split(b'\t\t'))
     res = client.post("https://akademik.its.ac.id/ipd_kuesionermk.php", data={
         "semesterTerm": SEMESTER_TERM,
         "thnAjaran": TAHUN_AJARAN,
@@ -210,7 +155,8 @@ def submit_lecturer_ipd():
     })
 
 def main():
-    login()
+    check_session()
+    
     codes, details = get_courses()
 
     # ipd mata kuliah
