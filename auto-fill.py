@@ -1,19 +1,44 @@
+from pathlib import Path
 from bs4 import BeautifulSoup
 from typing import List, Tuple
 from settings import *
 from utils.log import log
-import requests
-import urllib3
+import atexit
+import os
 import re
+import requests
+import shutil
+import tempfile
 
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+BASE_DIR = Path(__file__).resolve().parent
+EXTRA_CA_CERT = BASE_DIR / "certs" / "SectigoPublicServerAuthenticationCAOVR36.pem"
 proxy = {'http': 'http://127.0.0.1:8080', 'https': 'http://127.0.0.1:8080'} # burp debug
+
+def build_ca_bundle() -> str:
+    ca_bundle = Path(
+        os.environ.get("REQUESTS_CA_BUNDLE")
+        or os.environ.get("SSL_CERT_FILE")
+        or requests.certs.where()
+    )
+
+    if not EXTRA_CA_CERT.exists():
+        return str(ca_bundle)
+
+    fd, bundle_path = tempfile.mkstemp(prefix="its-ipd-ca-", suffix=".pem")
+    with os.fdopen(fd, "wb") as output:
+        for cert_path in (ca_bundle, EXTRA_CA_CERT):
+            with cert_path.open("rb") as cert:
+                shutil.copyfileobj(cert, output)
+            output.write(b"\n")
+
+    atexit.register(lambda: Path(bundle_path).unlink(missing_ok=True))
+    return bundle_path
 
 def check_session() -> bool:
     client.cookies.set('PHPSESSID', PHPSESSID)
     res = client.get("https://akademik.its.ac.id/home.php", allow_redirects=True)
     if 'Microsoft' in res.text:
-        log.failure('Provide a valid PHPSESSID')
+        log.error('Provide a valid PHPSESSID')
         exit(1)
     global soup, SEMESTER_TERM, TAHUN_AJARAN
     soup = BeautifulSoup(res.text, 'html.parser')
@@ -37,7 +62,7 @@ def get_courses() -> Tuple[List[str], List[str]]:
         courses_code = re.findall(value_pattern, str(select ))
         courses_detail = re.findall(str_pattern, str(select))
     except Exception as e:
-        log.failure(f'Failed to parse the course list: {e}')
+        log.error(f'Failed to parse the course list: {e}')
         exit(1)
     
     for i in range(len(courses_code)):
@@ -58,7 +83,7 @@ def change_to_course_ipd(code) -> bool:
     })
 
     if res.status_code != 200:
-        log.failure('failed to change course: %s', code)
+        log.error('failed to change course: %s', code)
         exit(1)
     
     if 'Anda sudah mengisi kuesioner untuk matakuliah ini' in res.text:
@@ -114,7 +139,7 @@ def get_lecturer_list(code) -> List[str]:
 
         return lecturer_path
     except Exception as e:
-        log.failure(f'Failed to parse the lecturer list: {e}')
+        log.error(f'Failed to parse the lecturer list: {e}')
         exit(1)
 
 def change_to_lecturer_ipd(path) -> bool:
@@ -127,7 +152,7 @@ def change_to_lecturer_ipd(path) -> bool:
         form = soup.find('form', {'name': 'form2', 'id': 'form2'})
         lecturer_name = re.findall(h3_pattern, str(form))
     except Exception as e:
-        log.failure(f'Failed to parse the lecturer page: {e}')
+        log.error(f'Failed to parse the lecturer page: {e}')
         exit(1)
 
     if 'Anda sudah mengisi kuesioner untuk dosen di matakuliah ini' in res.text:
@@ -168,7 +193,7 @@ def main():
             log.success("IPD mata kuliah %s sudah terisi", details[i].split("-")[1].strip())
 
     # ipd dosen
-    for code in enumerate(codes):
+    for code in codes:
         lecturers = get_lecturer_list(code)
         for lecturer in lecturers:
             if(change_to_lecturer_ipd(lecturer)):
@@ -177,4 +202,5 @@ def main():
 if __name__ == '__main__':
     global client
     client = requests.Session()
+    client.verify = build_ca_bundle()
     main()
